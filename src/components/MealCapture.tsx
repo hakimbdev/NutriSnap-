@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
-import { Camera } from './Camera'
 import { addMealWithVision } from '@/lib/db'
+import { analyzeMealImage, estimateNutritionFromImage } from '@/lib/vision'
+import { motion, AnimatePresence } from 'framer-motion'
 
 interface MealCaptureProps {
   userId: string
@@ -9,131 +10,254 @@ interface MealCaptureProps {
 
 export const MealCapture: React.FC<MealCaptureProps> = ({ userId, onMealAdded }) => {
   const [isCapturing, setIsCapturing] = useState(false)
-  const [analysis, setAnalysis] = useState<any>(null)
   const [error, setError] = useState<string | null>(null)
-  const [mealType, setMealType] = useState<'breakfast' | 'lunch' | 'dinner' | 'snack'>('lunch')
+  const [analysisResult, setAnalysisResult] = useState<any>(null)
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [selectedMealType, setSelectedMealType] = useState<string | null>(null)
+  const [capturedImage, setCapturedImage] = useState<string | null>(null)
 
-  const handleCapture = async (imageFile: File, nutritionAnalysis: any) => {
+  const mealTypes = [
+    { id: 'breakfast', icon: '🍳', label: 'Breakfast' },
+    { id: 'lunch', icon: '🍱', label: 'Lunch' },
+    { id: 'dinner', icon: '🍽️', label: 'Dinner' },
+    { id: 'snack', icon: '🥪', label: 'Snack' }
+  ]
+
+  const getMealTypeIcon = (type: string) => {
+    return mealTypes.find(t => t.id === type)?.icon || '🍽️'
+  }
+
+  const handleImageSelect = async (imageData: string) => {
+    if (!selectedMealType) {
+      setError('Please select a meal type first')
+      return
+    }
+
+    setIsProcessing(true)
+    setError(null)
+    setCapturedImage(imageData)
+
     try {
-      setAnalysis(nutritionAnalysis)
-      
-      // Save the meal to the database
-      await addMealWithVision(imageFile, userId, mealType)
-      
-      // Notify parent component
+      // First analyze the image
+      const visionResult = await analyzeMealImage(imageData)
+      if (!visionResult || !visionResult.detectedItems || visionResult.detectedItems.length === 0) {
+        throw new Error('No food items detected in the image')
+      }
+
+      // Then estimate nutrition
+      const nutritionResult = await estimateNutritionFromImage(visionResult)
+      if (!nutritionResult) {
+        throw new Error('Failed to estimate nutrition')
+      }
+
+      // Save the meal
+      const mealData = await addMealWithVision(userId, imageData, selectedMealType, visionResult, nutritionResult)
+      setAnalysisResult(mealData)
       onMealAdded()
-      
-      // Reset state
-      setIsCapturing(false)
-      setAnalysis(null)
-    } catch (error) {
-      console.error('Error saving meal:', error)
-      setError('Failed to save meal. Please try again.')
+    } catch (err) {
+      console.error('Error processing image:', err)
+      setError(err instanceof Error ? err.message : 'Failed to analyze image. Please try again.')
+    } finally {
+      setIsProcessing(false)
     }
   }
 
-  const handleError = (errorMessage: string) => {
-    setError(errorMessage)
+  const handleCancel = () => {
+    setIsCapturing(false)
+    setError(null)
+    setAnalysisResult(null)
+    setCapturedImage(null)
   }
 
   return (
-    <div className="w-full max-w-2xl mx-auto p-4">
-      {!isCapturing ? (
-        <div className="space-y-4">
-          <h2 className="text-2xl font-bold text-center">Capture Your Meal</h2>
-          
-          <div className="flex justify-center gap-4">
-            <button
-              onClick={() => setIsCapturing(true)}
-              className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              Take Photo
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-4">
-          <div className="flex justify-between items-center">
-            <h2 className="text-2xl font-bold">Take Photo</h2>
-            <button
-              onClick={() => setIsCapturing(false)}
-              className="text-gray-600 hover:text-gray-800"
-            >
-              Cancel
-            </button>
-          </div>
-
-          <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Meal Type
-            </label>
-            <select
-              value={mealType}
-              onChange={(e) => setMealType(e.target.value as any)}
-              className="w-full p-2 border rounded-lg"
-            >
-              <option value="breakfast">Breakfast</option>
-              <option value="lunch">Lunch</option>
-              <option value="dinner">Dinner</option>
-              <option value="snack">Snack</option>
-            </select>
-          </div>
-
-          <Camera onCapture={handleCapture} onError={handleError} />
-
-          {error && (
-            <div className="p-4 bg-red-50 text-red-700 rounded-lg">
-              {error}
+    <div className="space-y-6">
+      <AnimatePresence mode="wait">
+        {!isCapturing ? (
+          <motion.div
+            key="meal-type"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="space-y-4"
+          >
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {mealTypes.map((type) => (
+                <motion.button
+                  key={type.id}
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => {
+                    setSelectedMealType(type.id)
+                    setIsCapturing(true)
+                  }}
+                  className={`p-6 rounded-xl text-center transition-colors ${
+                    selectedMealType === type.id
+                      ? 'bg-blue-50 border-2 border-blue-500'
+                      : 'bg-white border-2 border-gray-200 hover:border-blue-300'
+                  }`}
+                >
+                  <motion.div
+                    animate={{ scale: [1, 1.1, 1] }}
+                    transition={{ duration: 0.5, repeat: Infinity }}
+                    className="text-4xl mb-2"
+                  >
+                    {type.icon}
+                  </motion.div>
+                  <div className="font-medium text-gray-900">{type.label}</div>
+                </motion.button>
+              ))}
             </div>
-          )}
-
-          {analysis && (
-            <div className="mt-4 p-4 bg-white rounded-lg shadow">
-              <h3 className="text-lg font-semibold mb-2">Nutrition Analysis</h3>
-              
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-sm text-gray-600">Calories</p>
-                  <p className="text-xl font-medium">{analysis.calories} kcal</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600">Proteins</p>
-                  <p className="text-xl font-medium">{analysis.proteins}g</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600">Carbs</p>
-                  <p className="text-xl font-medium">{analysis.carbs}g</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600">Fats</p>
-                  <p className="text-xl font-medium">{analysis.fats}g</p>
-                </div>
-              </div>
-
-              {analysis.analysis.insights.length > 0 && (
-                <div className="mt-4">
-                  <h4 className="font-medium mb-2">Insights</h4>
-                  <ul className="list-disc list-inside text-sm text-gray-600">
-                    {analysis.analysis.insights.map((insight: string, index: number) => (
-                      <li key={index}>{insight}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {analysis.analysis.recommendations.length > 0 && (
-                <div className="mt-4">
-                  <h4 className="font-medium mb-2">Recommendations</h4>
-                  <ul className="list-disc list-inside text-sm text-gray-600">
-                    {analysis.analysis.recommendations.map((rec: string, index: number) => (
-                      <li key={index}>{rec}</li>
-                    ))}
-                  </ul>
+          </motion.div>
+        ) : (
+          <motion.div
+            key="camera"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="space-y-4"
+          >
+            <div className="relative aspect-video bg-gray-100 rounded-lg overflow-hidden">
+              {capturedImage ? (
+                <motion.img
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  src={capturedImage}
+                  alt="Captured meal"
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <motion.div
+                    animate={{ scale: [1, 1.2, 1] }}
+                    transition={{ duration: 1, repeat: Infinity }}
+                    className="text-6xl"
+                  >
+                    📸
+                  </motion.div>
                 </div>
               )}
             </div>
+
+            <div className="flex justify-center space-x-4">
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={handleCancel}
+                className="px-6 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
+              >
+                Cancel
+              </motion.button>
+              {!capturedImage && (
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => {/* Implement camera capture */}}
+                  className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  Take Photo
+                </motion.button>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {isProcessing && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="text-center py-8"
+        >
+          <motion.div
+            animate={{ rotate: 360 }}
+            transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+            className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full mx-auto mb-4"
+          />
+          <div className="text-gray-600">Analyzing your meal...</div>
+        </motion.div>
+      )}
+
+      {error && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-lg"
+        >
+          <div className="flex items-center">
+            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            {error}
+          </div>
+        </motion.div>
+      )}
+
+      {analysisResult && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white rounded-lg shadow-sm p-6 space-y-4"
+        >
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-medium text-gray-900">Analysis Results</h3>
+            <span className="text-sm text-gray-500 capitalize">{analysisResult.meal_type}</span>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <motion.div
+              whileHover={{ scale: 1.05 }}
+              className="bg-blue-50 p-4 rounded-lg"
+            >
+              <div className="text-sm text-blue-600">Calories</div>
+              <div className="text-2xl font-bold text-blue-700">{analysisResult.calories}</div>
+            </motion.div>
+            <motion.div
+              whileHover={{ scale: 1.05 }}
+              className="bg-green-50 p-4 rounded-lg"
+            >
+              <div className="text-sm text-green-600">Proteins</div>
+              <div className="text-2xl font-bold text-green-700">{analysisResult.proteins}g</div>
+            </motion.div>
+            <motion.div
+              whileHover={{ scale: 1.05 }}
+              className="bg-yellow-50 p-4 rounded-lg"
+            >
+              <div className="text-sm text-yellow-600">Carbs</div>
+              <div className="text-2xl font-bold text-yellow-700">{analysisResult.carbs}g</div>
+            </motion.div>
+            <motion.div
+              whileHover={{ scale: 1.05 }}
+              className="bg-red-50 p-4 rounded-lg"
+            >
+              <div className="text-sm text-red-600">Fats</div>
+              <div className="text-2xl font-bold text-red-700">{analysisResult.fats}g</div>
+            </motion.div>
+          </div>
+
+          {analysisResult.insights && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.2 }}
+              className="bg-gray-50 p-4 rounded-lg"
+            >
+              <h4 className="font-medium text-gray-900 mb-2">Insights</h4>
+              <p className="text-gray-600">{analysisResult.insights}</p>
+            </motion.div>
           )}
-        </div>
+
+          {analysisResult.recommendations && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.3 }}
+              className="bg-blue-50 p-4 rounded-lg"
+            >
+              <h4 className="font-medium text-blue-900 mb-2">Recommendations</h4>
+              <p className="text-blue-700">{analysisResult.recommendations}</p>
+            </motion.div>
+          )}
+        </motion.div>
       )}
     </div>
   )
